@@ -14,7 +14,7 @@ services:
 
   tower:
     restart: always
-    image: "quay.io/openware/tower:2.6.66"
+    image: "quay.io/openware/tower:2.6.24"
     volumes:
       - ../config/frontend/tower.js:/home/app/env.js
     labels:
