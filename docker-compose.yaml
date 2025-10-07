@@ -1,0 +1,426 @@
+version: '3.8'
+
+services:
+  # Reverse Proxy
+  proxy:
+    image: traefik:2.1.8
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - letsencrypt_data:/letsencrypt
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--entryPoints.web.forwardedHeaders.insecure"
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=${SSL_EMAIL}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+    labels:
+      - "traefik.enable=true"
+
+  # Vault for secrets management
+  vault:
+    image: vault:1.3.0
+    restart: always
+    volumes:
+      - vault_data:/vault
+      - ./config/vault:/tmp/policies
+    command:
+      - server
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_LOCAL_CONFIG: '{"storage": {"file": { "path": "/vault/data" }}, "listener": {"tcp":{"address": "0.0.0.0:8200","tls_disable":"1"}}}'
+      VAULT_ADDR: http://vault:8200
+    ports:
+      - "8200:8200"
+
+  # Database
+  db:
+    image: mysql:5.7
+    restart: always
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./config/mysql:/etc/mysql/conf.d
+    ports:
+      - "3306:3306"
+
+  # Redis
+  redis:
+    image: redis:4.0.10
+    restart: always
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+
+  # RabbitMQ
+  rabbitmq:
+    image: rabbitmq:3.7.6-management
+    restart: always
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  # InfluxDB
+  influxdb:
+    image: influxdb:1.7.10
+    restart: always
+    environment:
+      - INFLUXDB_DB=peatio_development
+      - INFLUXDB_ADMIN_USER=admin
+      - INFLUXDB_ADMIN_PASSWORD=changeme
+      - INFLUXDB_ADMIN_ENABLED=true
+    volumes:
+      - influx_data:/var/lib/influxdb
+      - ./config/influxdb/build_candles.sql:/build_candles.sql
+      - ./config/influxdb/arke.sql:/arke.sql
+      - ./config/influxdb/peatio.sql:/peatio.sql
+    ports:
+      - "8086:8086"
+
+  # Peatio (Main Trading Engine)
+  peatio:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_RAILS_VAULT_TOKEN}
+      - PORT=8002
+    env_file:
+      - ./config/peatio.env
+    expose:
+      - "8002"
+    volumes:
+      - ./config/peatio/seed:/opt/peatio/config/seed
+      - ./config/peatio/management_api_v1.yml:/opt/peatio/config/management_api_v1.yml
+      - ./config/peatio/plugins.yml:/opt/peatio/config/plugins.yml
+      - ./config/peatio/abilities.yml:/opt/peatio/config/abilities.yml
+    depends_on:
+      - db
+      - redis
+      - vault
+    command: bash -c "bin/link_config && bundle exec puma --config config/puma.rb -p 8002"
+
+  # Barong (Authentication Service)
+  barong:
+    image: quay.io/openware/barong:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${BARONG_VAULT_TOKEN}
+    env_file:
+      - ./config/barong.env
+    expose:
+      - "8001"
+    volumes:
+      - ./config/secrets:/secrets:ro
+      - ./config/barong/seeds.yml:/home/app/config/seeds.yml
+      - ./config/barong/barong.yml:/home/app/config/barong.yml
+      - ./config/barong/authz_rules.yml:/home/app/config/authz_rules.yml
+      - ./config/barong/management_api.yml:/home/app/config/management_api.yml
+      - ./config/barong/abilities.yml:/home/app/config/abilities.yml
+    depends_on:
+      - db
+      - redis
+      - vault
+
+  # API Gateway
+  gateway:
+    image: envoyproxy/envoy:v1.10.0
+    restart: always
+    volumes:
+      - ./config/gateway:/etc/envoy/
+    command: /usr/local/bin/envoy -l info -c /etc/envoy/envoy.yaml
+    expose:
+      - "8099"
+    depends_on:
+      - peatio
+      - barong
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gateway.rule=Host(`${SUBDOMAIN}.${DOMAIN}`) && PathPrefix(`/api`,`/admin`,`/assets/`)"
+      - "traefik.http.routers.gateway.entrypoints=websecure"
+      - "traefik.http.routers.gateway.tls=true"
+      - "traefik.http.routers.gateway.tls.certresolver=myresolver"
+      - "traefik.http.services.gateway.loadbalancer.server.port=8099"
+
+  # Frontend
+  frontend:
+    image: quay.io/openware/baseapp:2.6.24
+    restart: always
+    volumes:
+      - ./config/frontend/env.js:/usr/share/nginx/html/config/env.js
+    expose:
+      - "3000"
+    depends_on:
+      - gateway
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${SUBDOMAIN}.${DOMAIN}`) && PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls=true"
+      - "traefik.http.routers.frontend.tls.certresolver=myresolver"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+
+  # Tower (Admin Panel)
+  tower:
+    image: quay.io/openware/tower:2.6.24
+    restart: always
+    volumes:
+      - ./config/frontend/tower.js:/home/app/env.js
+    expose:
+      - "8080"
+    depends_on:
+      - gateway
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tower.rule=Host(`${SUBDOMAIN}.${DOMAIN}`) && PathPrefix(`/tower`)"
+      - "traefik.http.routers.tower.entrypoints=websecure"
+      - "traefik.http.routers.tower.tls=true"
+      - "traefik.http.routers.tower.tls.certresolver=myresolver"
+      - "traefik.http.services.tower.loadbalancer.server.port=8080"
+
+  # Applogic (Trading Logic)
+  applogic:
+    image: rubykube/applogic:latest
+    restart: always
+    environment:
+      - PEATIO_URL=http://peatio:8002
+    env_file:
+      - ./config/applogic.env
+    expose:
+      - "8081"
+    volumes:
+      - ./config/applogic/management_api_v2.yml:/home/app/config/management_api_v2.yml
+    depends_on:
+      - peatio
+      - barong
+
+  # Rango (Cross-chain Bridge)
+  rango:
+    image: quay.io/openware/rango:2.6.1
+    restart: always
+    env_file:
+      - ./config/rango.env
+    expose:
+      - "8004"
+    depends_on:
+      - peatio
+      - barong
+
+  # Background Workers - Blockchain
+  peatio-blockchain:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_CRYPTO_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/daemons.rb blockchain"
+    depends_on:
+      - peatio
+
+  # Background Workers - Cron Job
+  peatio-cron:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_CRYPTO_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/daemons.rb cron_job"
+    depends_on:
+      - peatio
+
+  # Background Workers - Deposit
+  peatio-deposit:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_CRYPTO_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/daemons.rb deposit"
+    depends_on:
+      - peatio
+
+  # Background Workers - Upstream
+  peatio-upstream:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_UPSTREAM_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/daemons.rb upstream"
+    depends_on:
+      - peatio
+
+  # Background Workers - Deposit Coin Address
+  peatio-deposit-coin-address:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_CRYPTO_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/amqp_daemon.rb deposit_coin_address"
+    depends_on:
+      - peatio
+
+  # Background Workers - Withdraw Coin
+  peatio-withdraw-coin:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_CRYPTO_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/amqp_daemon.rb withdraw_coin"
+    depends_on:
+      - peatio
+
+  # Background Workers - Influx Writer
+  peatio-influx-writer:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/amqp_daemon.rb influx_writer"
+    depends_on:
+      - peatio
+
+  # Background Workers - Matching
+  peatio-matching:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_MATCHING_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/amqp_daemon.rb matching"
+    depends_on:
+      - peatio
+
+  # Background Workers - Order Processor
+  peatio-order-processor:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_MATCHING_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/amqp_daemon.rb order_processor"
+    depends_on:
+      - peatio
+
+  # Background Workers - Trade Executor
+  peatio-trade-executor:
+    image: quay.io/openware/peatio:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${PEATIO_MATCHING_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    volumes:
+      - ./config/peatio:/opt/peatio/config:ro
+    command: bash -c "bin/link_config && bundle exec ruby lib/daemons/amqp_daemon.rb trade_executor"
+    depends_on:
+      - peatio
+
+  # Mailer Service
+  mailer:
+    image: quay.io/openware/barong:2.6.48
+    restart: always
+    env_file:
+      - ./config/barong.env
+    volumes:
+      - ./config/secrets:/secrets:ro
+      - ./config/mailer/templates:/home/app/app/views/postmaster
+      - ./config/mailer.yml:/home/app/config/mailer.yml
+    command: bash -c "bin/mailer run"
+    depends_on:
+      - barong
+
+  # Sidekiq Workers - Barong
+  barong-sidekiq:
+    image: quay.io/openware/barong:2.6.48
+    restart: always
+    environment:
+      - VAULT_TOKEN=${BARONG_VAULT_TOKEN}
+    env_file:
+      - ./config/barong.env
+    volumes:
+      - ./config/secrets:/secrets:ro
+      - ./config/barong/seeds.yml:/home/app/config/seeds.yml
+      - ./config/barong/barong.yml:/home/app/config/barong.yml
+      - ./config/barong/authz_rules.yml:/home/app/config/authz_rules.yml
+      - ./config/barong/management_api.yml:/home/app/config/management_api.yml
+    command: bash -c "bundle exec sidekiq"
+    depends_on:
+      - barong
+
+  # Sidekiq Workers - Applogic
+  applogic-sidekiq:
+    image: rubykube/applogic:latest
+    restart: always
+    env_file:
+      - ./config/barong.env
+    volumes:
+      - ./config/applogic/management_api_v2.yml:/home/app/config/management_api_v2.yml
+      - ./config/applogic/schedule.yml:/home/app/config/schedule.yml
+    command: bash -c "bundle exec sidekiq"
+    depends_on:
+      - applogic
+
+  # Event API Listener
+  listener:
+    image: rubykube/applogic:latest
+    restart: always
+    env_file:
+      - ./config/applogic.env
+    volumes:
+      - ./config/applogic/management_api_v2.yml:/home/app/config/management_api_v2.yml
+    command: bash -c "bundle exec rake event_api_listener"
+    depends_on:
+      - applogic
+
+volumes:
+  db_data:
+  redis_data:
+  rabbitmq_data:
+  influx_data:
+  vault_data:
+  letsencrypt_data:

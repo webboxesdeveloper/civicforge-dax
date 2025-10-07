@@ -29,12 +29,12 @@ kyc:
   api_endpoint: https://api.kycaid.com/
 vault:
   root_token: s.ibY2CbhTUvDc24QgeCjObhsK
-  peatio_rails_token: s.k9Rzxj3AchYTEEj5rKguXwx0
-  peatio_crypto_token: s.bFXRTRT2S2DM5AfWGnOD5QuB
-  peatio_upstream_token: s.zEROqCCKSC6B0fqRShU6NqPg
-  peatio_matching_token: s.fxLxVWWwGhH5eVt3ni3ksdAO
-  barong_token: s.do9Cb5RZvFXzCBnaJQJeFN5w
-  finex_engine_token: s.34P1VAt7UMgKkyxYZoTB3n0k
+  peatio_rails_token: s.QD6pkXQh6l6cqf2fuCqFHroc
+  peatio_crypto_token: s.0mJjYmGoUrrI2WmoeSOIiuXk
+  peatio_upstream_token: s.z0BRWQYs7u27kW3nRfQHVeHS
+  peatio_matching_token: s.ZZB5sz5myeDB573UcgHtCtJJ
+  barong_token: s.xVeJhP8FzUtqyKPGjyi4w1HN
+  finex_engine_token: s.bQkwmzBlEhFUTPKSEL6XZCUl
 database:
   host: db
   adapter: mysql
