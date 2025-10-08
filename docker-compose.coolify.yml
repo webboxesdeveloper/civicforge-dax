@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # Backend Infrastructure
+  db:
+    restart: always
+    image: mysql:5.7
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./config/mysql:/etc/mysql/conf.d
+    environment:
+      MYSQL_ROOT_PASSWORD: changeme
+      MYSQL_DATABASE: civicforge_production
+
+  redis:
+    image: redis:4.0.10
+    restart: always
+    volumes:
+      - redis_data:/data
+
+  rabbitmq:
+    image: rabbitmq:3.7.6-management
+    restart: always
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  influxdb:
+    image: influxdb:1.7.10
+    restart: always
+    volumes:
+      - influx_data:/var/lib/influxdb
+    environment:
+       INFLUXDB_ADMIN_ENABLED: "true"
+
+  vault:
+    image: vault:1.3.0
+    restart: always
+    volumes:
+      - vault_data:/vault
+      - ./config/vault:/tmp/policies
+    command:
+      - server
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_LOCAL_CONFIG: '{"storage": {"file": { "path": "/vault/data" }}, "listener": {"tcp":{"address": "0.0.0.0:8200","tls_disable":"1"}}}'
+      VAULT_ADDR: http://vault:8200
+
+  # Reverse Proxy
+  proxy:
+    restart: always
+    image: traefik:2.1.8
+    ports:
+      - "8081:80"
+      - "8443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.web.forwardedHeaders.insecure"
+
+  # Core Application Services
+  peatio:
+    restart: always
+    image: "quay.io/openware/peatio:2.6.48"
+    environment:
+      - VAULT_TOKEN=${PEATIO_RAILS_VAULT_TOKEN}
+    env_file:
+      - ./config/peatio.env
+    ports:
+      - "3001:8002"
+    volumes:
+      - ./config/peatio/seed:/opt/peatio/config/seed
+      - ./config/peatio/management_api_v1.yml:/opt/peatio/config/management_api_v1.yml
+      - ./config/peatio/plugins.yml:/opt/peatio/config/plugins.yml
+      - ./config/peatio/abilities.yml:/opt/peatio/config/abilities.yml
+    command: bash -c "bin/link_config && bundle exec puma --config config/puma.rb -p 8002"
+
+  barong:
+    restart: always
+    image: "quay.io/openware/barong:2.6.48"
+    env_file:
+      - ./config/barong.env
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./config/secrets:/secrets:ro
+      - ./config/barong/seeds.yml:/home/app/config/seeds.yml
+      - ./config/barong/barong.yml:/home/app/config/barong.yml
+      - ./config/barong/authz_rules.yml:/home/app/config/authz_rules.yml
+      - ./config/barong/management_api.yml:/home/app/config/management_api.yml
+      - ./config/barong/abilities.yml:/home/app/config/abilities.yml
+
+  frontend:
+    restart: always
+    image: "quay.io/openware/baseapp:2.6.24"
+    ports:
+      - "3002:3000"
+    volumes:
+      - ./config/frontend/env.js:/usr/share/nginx/html/config/env.js
+    labels:
+      - "traefik.http.routers.frontend-civicforge.rule=Host(`www.app.local`) && PathPrefix(`/`)"
+      - "traefik.enable=true"
+      - "traefik.http.services.frontend-civicforge.loadbalancer.server.port=3000"
+      - "traefik.http.routers.frontend-civicforge.entrypoints=web"
+
+  gateway:
+    restart: always
+    image: envoyproxy/envoy:v1.10.0
+    ports:
+      - "10001:8099"
+    volumes:
+      - ./config/gateway:/etc/envoy/
+    command: /usr/local/bin/envoy -l info -c /etc/envoy/envoy.yaml
+    labels:
+      - "traefik.http.routers.gateway-civicforge.rule=Host(`www.app.local`) && PathPrefix(`/api`,`/admin`,`/assets/`)"
+      - "traefik.enable=true"
+      - "traefik.http.services.gateway-civicforge.loadbalancer.server.port=8099"
+      - "traefik.http.routers.gateway-civicforge.entrypoints=web"
+
+  applogic:
+    restart: always
+    image: "rubykube/applogic:latest"
+    env_file:
+      - ./config/applogic.env
+    ports:
+      - "8083:8081"
+    volumes:
+      - ./config/applogic/management_api_v2.yml:/home/app/config/management_api_v2.yml
+
+volumes:
+  db_data:
+  rabbitmq_data:
+  redis_data:
+  vault_data:
+  influx_data:

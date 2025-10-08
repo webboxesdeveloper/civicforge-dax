@@ -177,22 +177,23 @@ services:
       - "traefik.http.services.frontend.loadbalancer.server.port=3000"
 
   # Tower (Admin Panel)
-  tower:
-    image: quay.io/openware/tower:2.6.24
-    restart: always
-    volumes:
-      - ./config/frontend/tower.js:/home/app/env.js
-    expose:
-      - "8080"
-    depends_on:
-      - gateway
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.tower.rule=Host(`${SUBDOMAIN}.${DOMAIN}`) && PathPrefix(`/tower`)"
-      - "traefik.http.routers.tower.entrypoints=websecure"
-      - "traefik.http.routers.tower.tls=true"
-      - "traefik.http.routers.tower.tls.certresolver=myresolver"
-      - "traefik.http.services.tower.loadbalancer.server.port=8080"
+  # Tower service removed due to unavailable Docker image
+  # tower:
+  #   image: quay.io/openware/tower:2.6.24
+  #   restart: always
+  #   volumes:
+  #     - ./config/frontend/tower.js:/home/app/env.js
+  #   expose:
+  #     - "8080"
+  #   depends_on:
+  #     - gateway
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.tower.rule=Host(`${SUBDOMAIN}.${DOMAIN}`) && PathPrefix(`/tower`)"
+  #     - "traefik.http.routers.tower.entrypoints=websecure"
+  #     - "traefik.http.routers.tower.tls=true"
+  #     - "traefik.http.routers.tower.tls.certresolver=myresolver"
+  #     - "traefik.http.services.tower.loadbalancer.server.port=8080"
 
   # Applogic (Trading Logic)
   applogic:
