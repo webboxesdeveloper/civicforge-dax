@@ -5,8 +5,8 @@ services:
     restart: always
     image: traefik:2.1.8
     ports:
-      - "80:80"
-      - "443:443"
+      - "8081:80"
+      - "8443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     command:

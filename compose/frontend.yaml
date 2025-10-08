@@ -4,6 +4,8 @@ services:
   frontend:
     restart: always
     image: "quay.io/openware/baseapp:2.6.24"
+    ports:
+      - "3002:3000"
     volumes:
       - ../config/frontend/env.js:/usr/share/nginx/html/config/env.js
     labels:
